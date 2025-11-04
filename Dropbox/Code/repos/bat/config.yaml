@@ -1,0 +1,48 @@
+# Cyber Evan Project Configuration
+# Vast.ai Instance Configuration
+
+# Vast.ai Instance Details
+vast_ai:
+  instance_id: "27547381"
+  public_ip: "174.78.228.101"
+  machine_copy_port: 40542  # SSH port from vast.ai dashboard
+  ssh_user: "root"  # Default for vast.ai instances
+  
+# SSH Configuration
+ssh:
+  key_path: "~/.ssh/vastai_key"  # Using vast.ai key from ~/.ssh/
+  port: 40542  # SSH port from vast.ai (instance port range: 40530-40595)
+  timeout: 30
+  retry_attempts: 3
+
+# Project Configuration
+project:
+  name: "bat"
+  remote_path: "/root/bat"  # Path on vast.ai instance
+  local_path: "/Users/mike/Dropbox/Code/repos/bat"
+  
+# Python Dependencies (to be installed on vast.ai)
+python_dependencies:
+  - pandas
+  - numpy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - pdf2image
+  - requests
+  - pillow
+
+# System Dependencies (to be installed on vast.ai)
+system_dependencies:
+  - git
+  - curl
+  - wget
+
+
+# Connection Settings
+connection:
+  test_command: "echo 'Connection successful'; uname -a"
+  setup_commands:
+    - "apt update"
+    - "apt install -y python3-pip"
+    - "pip3 install --upgrade pip"
