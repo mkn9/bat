@@ -52,3 +52,7 @@ kinematics:
   output_dir: "output"
   marker_interval: 10  # Show marker every Nth point in visualizations
   generate_visualizations: true  # Generate PNG plots in addition to CSV files
+
+# MAGVIT Configuration
+magvit:
+  example_script: "magvit/simple_example.py"  # Path to simple example script

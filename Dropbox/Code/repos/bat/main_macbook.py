@@ -284,6 +284,91 @@ class VastAIConnector:
         except Exception as e:
             print(f"❌ Error downloading files: {e}")
             return False
+    
+    def run_magvit_example(self) -> bool:
+        """Run MAGVIT simple example on vast.ai instance"""
+        print("🎬 Running MAGVIT simple example...")
+        
+        magvit_config = self.config.get('magvit', {})
+        example_script = magvit_config.get('example_script', 'magvit/simple_example.py')
+        
+        # Change to project directory and run the example
+        command = f"cd {self.remote_path} && python3 {example_script}"
+        
+        result = self._run_ssh_command(command, capture_output=False)
+        
+        if result.returncode == 0:
+            print("✅ MAGVIT example completed successfully!")
+            
+            # List output directory if it exists
+            list_cmd = f"cd {self.remote_path} && ls -la magvit_test_* 2>/dev/null | head -5 || echo 'No test output directories found'"
+            self._run_ssh_command(list_cmd)
+            return True
+        else:
+            print("❌ Failed to run MAGVIT example!")
+            return False
+    
+    def run_magvit_training(self) -> bool:
+        """Run MAGVIT training example (PyTorch-based) on vast.ai instance"""
+        print("🎬 Running MAGVIT training example (PyTorch-based)...")
+        print("   This will train on synthetic video data")
+        print("   This will take several minutes...")
+        
+        # Change to project directory and run the training example
+        command = f"cd {self.remote_path}/magvit && python3 train_example.py"
+        
+        result = self._run_ssh_command(command, capture_output=False)
+        
+        if result.returncode == 0:
+            print("✅ MAGVIT training completed successfully!")
+            
+            # List output directory if it exists
+            list_cmd = f"cd {self.remote_path}/magvit && ls -la experiments/simple_magvit/ 2>/dev/null | head -10 || echo 'No training output directories found'"
+            self._run_ssh_command(list_cmd)
+            return True
+        else:
+            print("❌ Failed to run MAGVIT training!")
+            return False
+    
+    def install_magvit_dependencies(self) -> bool:
+        """Install MAGVIT dependencies (PyTorch-based) on vast.ai instance"""
+        print("📦 Installing MAGVIT dependencies (PyTorch-based)...")
+        print("   This may take several minutes...")
+        
+        # Install PyTorch-based dependencies (much simpler than JAX/TensorFlow!)
+        commands = [
+            f"cd {self.remote_path}/magvit",
+            # Install PyTorch with CUDA support
+            "pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",
+            # Install other dependencies
+            "pip3 install opencv-python numpy matplotlib tqdm",
+            # Optional: tensorboard for logging
+            "pip3 install tensorboard"
+        ]
+        
+        # Install dependencies
+        for i, cmd in enumerate(commands, 1):
+            print(f"   Step {i}/{len(commands)}: {' '.join(cmd.split()[:3])}...")
+            result = self._run_ssh_command(cmd, capture_output=False)
+            
+            if result.returncode != 0:
+                print(f"   ⚠️  Step {i} had non-zero exit code (may be OK if packages already installed)")
+        
+        # Verify installation
+        print("\n🔍 Verifying installation...")
+        verify_cmd = f"cd {self.remote_path}/magvit && python3 -c \"import torch; import cv2; import numpy; import matplotlib; from simple_magvit_model import SimpleMagvitModel, ModelConfig; print('✅ All dependencies: OK'); print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())\""
+        verify_result = self._run_ssh_command(verify_cmd, capture_output=True)
+        
+        if verify_result.returncode == 0:
+            print("✅ MAGVIT dependencies installed successfully!")
+            stdout_text = verify_result.stdout.decode('utf-8') if isinstance(verify_result.stdout, bytes) else str(verify_result.stdout)
+            print(stdout_text.strip())
+            return True
+        else:
+            print("⚠️  Some dependencies may not be installed correctly")
+            stderr_text = verify_result.stderr.decode('utf-8') if (verify_result.stderr and isinstance(verify_result.stderr, bytes)) else str(verify_result.stderr) if verify_result.stderr else "Unknown error"
+            print("   Error:", stderr_text.strip())
+            return False
 
 
 def main():
@@ -298,6 +383,9 @@ def main():
     parser.add_argument('--shell', action='store_true', help='Open remote shell')
     parser.add_argument('--command', help='Execute remote command')
     parser.add_argument('--run-kinematics', action='store_true', help='Run kinematics examples generation')
+    parser.add_argument('--run-magvit', action='store_true', help='Run MAGVIT simple example')
+    parser.add_argument('--run-magvit-training', action='store_true', help='Run MAGVIT training and inference example')
+    parser.add_argument('--install-magvit-deps', action='store_true', help='Install MAGVIT dependencies on vast.ai')
     
     args = parser.parse_args()
     
@@ -345,8 +433,20 @@ def main():
         if not connector.run_kinematics_examples():
             sys.exit(1)
     
+    if args.run_magvit:
+        if not connector.run_magvit_example():
+            sys.exit(1)
+    
+    if args.run_magvit_training:
+        if not connector.run_magvit_training():
+            sys.exit(1)
+    
+    if args.install_magvit_deps:
+        if not connector.install_magvit_dependencies():
+            sys.exit(1)
+    
     # If no specific action requested, show help
-    if not any([args.setup, args.install_deps, args.sync, args.download_output, args.command, args.shell, args.run_kinematics]):
+    if not any([args.setup, args.install_deps, args.sync, args.download_output, args.command, args.shell, args.run_kinematics, args.run_magvit, args.run_magvit_training, args.install_magvit_deps]):
         print("\n📋 Available operations:")
         print("   --test          Test connection to vast.ai")
         print("   --setup         Setup basic environment")
@@ -356,8 +456,14 @@ def main():
         print("   --shell         Open remote shell")
         print("   --command CMD   Execute remote command")
         print("   --run-kinematics Run kinematics examples generation")
+        print("   --run-magvit     Run MAGVIT simple example")
+        print("   --run-magvit-training Run MAGVIT training and inference example")
+        print("   --install-magvit-deps Install MAGVIT dependencies on vast.ai")
         print("\n💡 Example: python3 main_macbook.py --install-deps --sync")
         print("💡 Example: python3 main_macbook.py --run-kinematics")
+        print("💡 Example: python3 main_macbook.py --install-magvit-deps")
+        print("💡 Example: python3 main_macbook.py --run-magvit-training")
+        print("💡 Example: python3 main_macbook.py --run-magvit")
         print("💡 Example: python3 main_macbook.py --download-output")
 
 
