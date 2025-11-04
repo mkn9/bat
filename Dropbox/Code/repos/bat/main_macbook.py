@@ -330,6 +330,80 @@ class VastAIConnector:
             print("❌ Failed to run MAGVIT training!")
             return False
     
+    def convert_kinematics_to_video(self) -> bool:
+        """Convert kinematics CSV examples to video dataset for MAGVIT training"""
+        print("🎬 Converting kinematics examples to video dataset...")
+        print("   This will create video frames from trajectory data with augmentation")
+        
+        # Get config values
+        kinematics_dir = os.path.join(self.remote_path, 'kinematics_examples')
+        output_dir = os.path.join(self.remote_path, self.config.get('magvit', {}).get('kinematics_dataset_dir', 'magvit/kinematics_dataset'))
+        num_augmentations = self.config.get('magvit', {}).get('num_augmentations', 3)
+        
+        # Run conversion script
+        command = f"cd {self.remote_path} && python3 kinematics_to_video.py --input_dir {kinematics_dir} --output_dir {output_dir} --num_augmentations {num_augmentations}"
+        
+        result = self._run_ssh_command(command, capture_output=False)
+        
+        if result.returncode == 0:
+            print("✅ Kinematics to video conversion completed!")
+            
+            # Show dataset stats
+            stats_cmd = f"cd {self.remote_path} && python3 -c \"import json; f=open('{output_dir}/dataset_metadata.json'); d=json.load(f); print(f'Total videos: {{d[\\'num_videos\\']}}'); print(f'Original examples: {{d[\\'num_original\\']}}'); print(f'Augmentations per example: {{d[\\'num_augmentations\\']}}')\" 2>&1"
+            self._run_ssh_command(stats_cmd)
+            return True
+        else:
+            print("❌ Failed to convert kinematics to video!")
+            return False
+    
+    def run_magvit_kinematics_training(self) -> bool:
+        """Run MAGVIT training on kinematics-based video dataset"""
+        print("🎬 Running MAGVIT training on kinematics dataset...")
+        print("   This will train the model to predict missing observations")
+        print("   This will take several minutes...")
+        
+        # Get dataset directory
+        dataset_dir = os.path.join(self.remote_path, self.config.get('magvit', {}).get('kinematics_dataset_dir', 'magvit/kinematics_dataset'))
+        
+        # Check if dataset exists
+        check_cmd = f"cd {self.remote_path} && test -d {dataset_dir}/videos && echo 'Dataset exists' || echo 'Dataset not found'"
+        check_result = self._run_ssh_command(check_cmd, capture_output=True)
+        stdout_text = check_result.stdout.decode('utf-8') if isinstance(check_result.stdout, bytes) else str(check_result.stdout)
+        
+        if 'Dataset not found' in stdout_text:
+            print("⚠️  Dataset not found. Running conversion first...")
+            if not self.convert_kinematics_to_video():
+                return False
+        
+        # Run training with kinematics dataset
+        output_dir = os.path.join(self.remote_path, 'magvit/experiments/kinematics_magvit')
+        command = f"cd {self.remote_path}/magvit && python3 -c \""
+        command += "from train_simple_magvit import VideoTrainer, ModelConfig; "
+        command += "import argparse; "
+        command += "import sys; "
+        command += "sys.path.insert(0, '..'); "
+        command += f"args = argparse.Namespace(data_dir='{dataset_dir}', output_dir='{output_dir}', "
+        command += "hidden_dim=256, num_layers=6, num_heads=8, epochs=10, batch_size=4, "
+        command += "learning_rate=1e-4, weight_decay=1e-4, grad_clip=1.0, save_freq=2, vis_freq=2, "
+        command += "use_wandb=False, run_name='kinematics', num_workers=2, seed=42); "
+        command += "config = ModelConfig(hidden_dim=256, num_layers=6, num_heads=8); "
+        command += "trainer = VideoTrainer(config, args); "
+        command += "trainer.train()"
+        command += "\""
+        
+        result = self._run_ssh_command(command, capture_output=False)
+        
+        if result.returncode == 0:
+            print("✅ MAGVIT kinematics training completed successfully!")
+            
+            # List output directory
+            list_cmd = f"cd {self.remote_path}/magvit && ls -la experiments/kinematics_magvit/ 2>/dev/null | head -10 || echo 'No training output found'"
+            self._run_ssh_command(list_cmd)
+            return True
+        else:
+            print("❌ Failed to run MAGVIT kinematics training!")
+            return False
+    
     def install_magvit_dependencies(self) -> bool:
         """Install MAGVIT dependencies (PyTorch-based) on vast.ai instance"""
         print("📦 Installing MAGVIT dependencies (PyTorch-based)...")
@@ -385,6 +459,8 @@ def main():
     parser.add_argument('--run-kinematics', action='store_true', help='Run kinematics examples generation')
     parser.add_argument('--run-magvit', action='store_true', help='Run MAGVIT simple example')
     parser.add_argument('--run-magvit-training', action='store_true', help='Run MAGVIT training and inference example')
+    parser.add_argument('--convert-kinematics', action='store_true', help='Convert kinematics CSV examples to video dataset')
+    parser.add_argument('--run-magvit-kinematics', action='store_true', help='Run MAGVIT training on kinematics dataset')
     parser.add_argument('--install-magvit-deps', action='store_true', help='Install MAGVIT dependencies on vast.ai')
     
     args = parser.parse_args()
@@ -439,6 +515,14 @@ def main():
     
     if args.run_magvit_training:
         if not connector.run_magvit_training():
+            sys.exit(1)
+    
+    if args.convert_kinematics:
+        if not connector.convert_kinematics_to_video():
+            sys.exit(1)
+    
+    if args.run_magvit_kinematics:
+        if not connector.run_magvit_kinematics_training():
             sys.exit(1)
     
     if args.install_magvit_deps:

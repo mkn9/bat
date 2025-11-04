@@ -56,3 +56,5 @@ kinematics:
 # MAGVIT Configuration
 magvit:
   example_script: "magvit/simple_example.py"  # Path to simple example script
+  kinematics_dataset_dir: "magvit/kinematics_dataset"  # Output directory for kinematics video dataset
+  num_augmentations: 3  # Number of augmentations per kinematics example (3 augs + 1 original = 4x multiplier)

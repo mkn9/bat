@@ -357,20 +357,28 @@ class SyntheticVideoDataset(Dataset):
         
         # Load tasks
         tasks = {}
-        task_types = ['frame_prediction', 'frame_interpolation', 'video_inpainting', 'video_outpainting']
+        task_types = ['frame_prediction', 'frame_interpolation', 'video_inpainting', 'video_outpainting', 'frame_prediction_masked']
         
         for task_type in task_types:
             input_path = self.data_dir / 'tasks' / f'{video_id}_{task_type}_input.npy'
             target_path = self.data_dir / 'tasks' / f'{video_id}_{task_type}_target.npy'
+            mask_path = self.data_dir / 'tasks' / f'{video_id}_{task_type}_mask.npy'
             
             if input_path.exists() and target_path.exists():
                 task_input = np.load(input_path)
                 task_target = np.load(target_path)
                 
-                tasks[task_type] = {
+                task_data = {
                     'input': torch.from_numpy(task_input).float() / 255.0,
                     'target': torch.from_numpy(task_target).float() / 255.0
                 }
+                
+                # Load mask if available
+                if mask_path.exists():
+                    mask = np.load(mask_path)
+                    task_data['mask'] = torch.from_numpy(mask).bool()
+                
+                tasks[task_type] = task_data
         
         return {
             'video_id': video_id,

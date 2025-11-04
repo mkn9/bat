@@ -158,8 +158,8 @@ class VideoTrainer:
         """Train for one epoch"""
         self.model.train()
         
-        # Task types for multi-task training
-        task_types = ['frame_prediction', 'frame_interpolation', 'video_inpainting', 'video_outpainting']
+        # Task types for multi-task training (including masked prediction)
+        task_types = ['frame_prediction', 'frame_interpolation', 'video_inpainting', 'video_outpainting', 'frame_prediction_masked']
         
         epoch_losses = {task: [] for task in task_types + ['total']}
         
@@ -176,10 +176,22 @@ class VideoTrainer:
             
             # Forward pass
             try:
-                predictions = self.model(videos, task_type=task_type)
+                # For masked tasks, use the task input if available
+                if task_type in batch['tasks'] and 'input' in batch['tasks'][task_type]:
+                    task_videos = batch['tasks'][task_type]['input'].to(self.device)
+                else:
+                    task_videos = videos
+                
+                predictions = self.model(task_videos, task_type=task_type)
+                
+                # Use target video for loss if available, otherwise use full video
+                if task_type in batch['tasks'] and 'target' in batch['tasks'][task_type]:
+                    target_videos = batch['tasks'][task_type]['target'].to(self.device)
+                else:
+                    target_videos = videos
                 
                 # Compute loss
-                loss_dict = self.loss_fn(predictions, videos, predictions['mask'], task_type)
+                loss_dict = self.loss_fn(predictions, target_videos, predictions['mask'], task_type)
                 
                 # Backward pass
                 loss_dict['total_loss'].backward()

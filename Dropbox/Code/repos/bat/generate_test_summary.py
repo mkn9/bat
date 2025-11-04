@@ -42,8 +42,24 @@ def generate_summary():
     """Generate test summary report"""
     test_files = [
         'test_kinematics_formulas.py',
-        'test_generate_kinematics_examples.py'
+        'test_generate_kinematics_examples.py',
+        'test_kinematics_to_video.py'
     ]
+    
+    # Try to parse test results from XML if available
+    test_results = {}
+    if os.path.exists('test_results_all.xml'):
+        try:
+            import xml.etree.ElementTree as ET
+            tree = ET.parse('test_results_all.xml')
+            root = tree.getroot()
+            for testcase in root.iter('testcase'):
+                test_name = testcase.get('name')
+                class_name = testcase.get('classname', '').split('.')[-1]
+                key = f"{class_name}::{test_name}" if class_name else test_name
+                test_results[key] = len(list(testcase.iter('failure'))) == 0
+        except Exception as e:
+            pass  # If XML parsing fails, continue without results
     
     all_tests = []
     for test_file in test_files:
@@ -71,7 +87,13 @@ def generate_summary():
         for class_name, class_tests in classes.items():
             report += f"### {class_name}\n\n"
             for test in class_tests:
-                report += f"- **{test['name']}**\n"
+                # Check if we have test results
+                test_key = f"{class_name}::{test['name']}"
+                status = ""
+                if test_key in test_results:
+                    status = " ✅ PASSED" if test_results[test_key] else " ❌ FAILED"
+                
+                report += f"- **{test['name']}**{status}\n"
                 if test['docstring']:
                     report += f"  - {test['docstring']}\n"
             report += "\n"
