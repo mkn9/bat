@@ -190,16 +190,34 @@ def generate_trajectory_points(
         v = np.array(params['initial_velocity'])
         straight_duration = params['straight_duration']
         radius = params['radius']
-        angular_velocity = params['angular_velocity']
         degrees_to_turn = params.get('degrees_to_turn', 90)
         radians_to_turn = np.deg2rad(degrees_to_turn)
         
+        # Calculate constant speed from initial velocity
+        speed = np.linalg.norm(v)
+        
         # Calculate where straight line ends
         straight_end_pos = position_constant_velocity(p0, v, straight_duration)
+        straight_distance = speed * straight_duration
         
         # Calculate circle center such that the circle is tangent to the straight line
         # The center is at a distance 'radius' perpendicular to the velocity direction
         vel_angle = np.arctan2(v[1], v[0])
+        
+        # Determine turn direction from angular_velocity if provided, otherwise default to right turn
+        angular_velocity_param = params.get('angular_velocity', None)
+        if angular_velocity_param is not None:
+            # Use provided angular velocity but ensure it matches the speed
+            angular_velocity = angular_velocity_param
+            # Ensure speed consistency: speed = radius * |angular_velocity|
+            expected_speed = radius * abs(angular_velocity)
+            if abs(expected_speed - speed) > 0.01:
+                # Adjust angular velocity to match speed
+                angular_velocity = (speed / radius) * np.sign(angular_velocity_param)
+        else:
+            # Default: right turn (positive angular velocity)
+            angular_velocity = speed / radius
+        
         # For right turn (positive angular_velocity), center is to the left of velocity
         # For left turn (negative angular_velocity), center is to the right of velocity
         perp_angle = vel_angle + np.pi/2 if angular_velocity > 0 else vel_angle - np.pi/2
@@ -210,20 +228,28 @@ def generate_trajectory_points(
         circle_start_angle = np.arctan2(straight_end_pos[1] - circle_center[1], 
                                        straight_end_pos[0] - circle_center[0])
         
-        circle_duration = radians_to_turn / abs(angular_velocity)
-        total_duration = straight_duration + circle_duration
+        # Calculate arc length for circular portion
+        circle_arc_length = radius * radians_to_turn
+        total_distance = straight_distance + circle_arc_length
         
-        # Adjust times to match actual duration
-        times = np.linspace(0, total_duration, num_points)
+        # Generate points at equal arc length intervals (not time intervals)
+        # This ensures constant speed throughout
+        arc_lengths = np.linspace(0, total_distance, num_points)
+        dt = total_distance / (speed * (num_points - 1)) if num_points > 1 else 0
         
-        for i, t in enumerate(times):
-            if t <= straight_duration:
+        for i, arc_length in enumerate(arc_lengths):
+            if arc_length <= straight_distance:
+                # Straight line portion
+                t = arc_length / speed
                 positions[i] = position_constant_velocity(p0, v, t)
                 velocities[i] = v
             else:
-                # Circular motion
-                circle_time = t - straight_duration
-                if circle_time <= circle_duration:
+                # Circular portion
+                circle_arc = arc_length - straight_distance
+                circle_angle = circle_arc / radius  # Arc length = radius * angle
+                circle_time = circle_angle / abs(angular_velocity)
+                
+                if circle_angle <= radians_to_turn:
                     positions[i] = circular_motion_position(
                         circle_center, radius, circle_start_angle, angular_velocity, circle_time
                     )
@@ -233,12 +259,13 @@ def generate_trajectory_points(
                 else:
                     # After circle, continue straight
                     final_circle_pos = circular_motion_position(
-                        circle_center, radius, circle_start_angle, angular_velocity, circle_duration
+                        circle_center, radius, circle_start_angle, angular_velocity, radians_to_turn / abs(angular_velocity)
                     )
                     final_circle_vel = circular_motion_velocity(
-                        circle_center, radius, circle_start_angle, angular_velocity, circle_duration
+                        circle_center, radius, circle_start_angle, angular_velocity, radians_to_turn / abs(angular_velocity)
                     )
-                    remaining_time = t - straight_duration - circle_duration
+                    remaining_arc = arc_length - straight_distance - circle_arc_length
+                    remaining_time = remaining_arc / speed
                     positions[i] = position_constant_velocity(final_circle_pos, final_circle_vel, remaining_time)
                     velocities[i] = final_circle_vel
     

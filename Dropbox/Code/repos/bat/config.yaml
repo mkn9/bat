@@ -46,3 +46,9 @@ connection:
     - "apt update"
     - "apt install -y python3-pip"
     - "pip3 install --upgrade pip"
+
+# Kinematics Examples Configuration
+kinematics:
+  output_dir: "output"
+  marker_interval: 10  # Show marker every Nth point in visualizations
+  generate_visualizations: true  # Generate PNG plots in addition to CSV files

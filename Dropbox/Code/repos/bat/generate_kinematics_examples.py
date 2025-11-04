@@ -2,11 +2,13 @@
 """
 Kinematics Examples Generator
 Generates 35 example trajectories with different motion patterns
+Creates both CSV data files and visualization plots
 """
 
 import numpy as np
 import pandas as pd
 import os
+import matplotlib.pyplot as plt
 from kinematics_formulas import generate_trajectory_points
 
 
@@ -184,10 +186,75 @@ def generate_straight_then_circle_examples():
     return examples
 
 
+def create_visualization(df, filename, output_dir, marker_interval=10):
+    """
+    Create visualization of object trajectory.
+    
+    Args:
+        df: DataFrame with columns ['time', 'x', 'y', 'vx', 'vy', 'motion_type']
+        filename: Base filename for saving (without extension)
+        output_dir: Directory to save the plot
+        marker_interval: Interval between markers (every Nth point)
+    """
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # Plot path trace (line connecting all points)
+    ax.plot(df['x'].values, df['y'].values, 'b-', linewidth=2, alpha=0.6, label='Path Trace')
+    
+    # Add markers at discrete time points
+    marker_indices = np.arange(0, len(df), marker_interval)
+    if len(df) - 1 not in marker_indices:
+        marker_indices = np.append(marker_indices, len(df) - 1)
+    
+    ax.plot(df['x'].iloc[marker_indices].values, 
+            df['y'].iloc[marker_indices].values, 
+            'ro', markersize=8, alpha=0.7, label='Time Markers')
+    
+    # Highlight final position with larger marker
+    final_x = df['x'].iloc[-1]
+    final_y = df['y'].iloc[-1]
+    ax.plot(final_x, final_y, 'go', markersize=15, 
+            markeredgewidth=2, markeredgecolor='black', label='Final Position')
+    
+    # Add arrow showing direction at final position
+    final_vx = df['vx'].iloc[-1]
+    final_vy = df['vy'].iloc[-1]
+    speed = np.sqrt(final_vx**2 + final_vy**2)
+    if speed > 0.1:  # Only draw arrow if there's significant velocity
+        arrow_length = min(speed * 0.5, 2.0)  # Scale arrow appropriately
+        ax.arrow(final_x, final_y, 
+                final_vx / speed * arrow_length, 
+                final_vy / speed * arrow_length,
+                head_width=0.3, head_length=0.2, fc='green', ec='black', linewidth=2)
+    
+    # Formatting
+    ax.set_xlabel('X Position', fontsize=12)
+    ax.set_ylabel('Y Position', fontsize=12)
+    ax.set_title(f'{filename.replace("_", " ").title()}\nMotion Type: {df["motion_type"].iloc[0]}', 
+                 fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best')
+    ax.set_aspect('equal', adjustable='box')
+    
+    # Save figure
+    plot_path = os.path.join(output_dir, f'{filename}.png')
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return plot_path
+
+
 def main():
-    """Generate all 35 examples and save to CSV files"""
-    output_dir = 'kinematics_examples'
+    """Generate all 35 examples and save to CSV files and visualizations"""
+    output_dir = 'output'
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Subdirectories for organization
+    csv_dir = os.path.join(output_dir, 'kinematics_examples')
+    plot_dir = os.path.join(output_dir, 'visualizations')
+    os.makedirs(csv_dir, exist_ok=True)
+    os.makedirs(plot_dir, exist_ok=True)
     
     print("Generating kinematics examples...")
     
@@ -197,13 +264,21 @@ def main():
     all_examples.extend(generate_constant_acceleration_examples())
     all_examples.extend(generate_straight_then_circle_examples())
     
-    # Save to CSV files
+    # Save to CSV files and create visualizations
+    marker_interval = 10  # Show marker every 10th point for good visualization
     for filename, df in all_examples:
-        filepath = os.path.join(output_dir, f'{filename}.csv')
-        df.to_csv(filepath, index=False)
-        print(f"✅ Saved {filepath} ({len(df)} points)")
+        # Save CSV
+        csv_path = os.path.join(csv_dir, f'{filename}.csv')
+        df.to_csv(csv_path, index=False)
+        print(f"✅ Saved {csv_path} ({len(df)} points)")
+        
+        # Create visualization
+        plot_path = create_visualization(df, filename, plot_dir, marker_interval=marker_interval)
+        print(f"✅ Created {plot_path}")
     
-    print(f"\n✅ Generated {len(all_examples)} example files in {output_dir}/")
+    print(f"\n✅ Generated {len(all_examples)} example files")
+    print(f"   - CSV files: {csv_dir}/")
+    print(f"   - Visualizations: {plot_dir}/")
     print(f"   - Constant velocity: 5 examples")
     print(f"   - Constant acceleration: 10 examples")
     print(f"   - Straight then circle: 20 examples")

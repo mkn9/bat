@@ -4,7 +4,9 @@ Cyber Evan Project - Main MacBook Interface
 Connects to vast.ai instance and manages project execution
 
 Usage:
-    python main_macbook.py [--config config.yaml] [--setup] [--test] [--install-deps]
+    python3 main_macbook.py [--config config.yaml] [--setup] [--test] [--install-deps]
+    
+Note: Always use 'python3' (not 'python') on macOS to avoid Python 2.7 compatibility issues.
 """
 
 import yaml
@@ -225,6 +227,63 @@ class VastAIConnector:
             subprocess.run(ssh_cmd)
         except KeyboardInterrupt:
             print("\n👋 Remote shell closed")
+    
+    def run_kinematics_examples(self) -> bool:
+        """Run kinematics examples generation on vast.ai instance"""
+        print("🎯 Running kinematics examples generation...")
+        
+        command = f"cd {self.remote_path} && python3 generate_kinematics_examples.py"
+        result = self._run_ssh_command(command, capture_output=False)
+        
+        if result.returncode == 0:
+            print("✅ Kinematics examples generated successfully!")
+            
+            # List output directory to show what was created
+            list_cmd = f"cd {self.remote_path} && ls -la output/ 2>/dev/null || echo 'Output directory not found'"
+            self._run_ssh_command(list_cmd)
+            return True
+        else:
+            print("❌ Failed to generate kinematics examples!")
+            return False
+    
+    def download_output_files(self, remote_dir: str = "output", local_dir: str = "output") -> bool:
+        """Download output files from vast.ai instance to MacBook"""
+        print(f"📥 Downloading output files from vast.ai instance...")
+        
+        local_path = self.config['project']['local_path']
+        remote_output_path = f"{self.remote_path}/{remote_dir}"
+        local_output_path = os.path.join(local_path, local_dir)
+        
+        # Create local output directory if it doesn't exist
+        os.makedirs(local_output_path, exist_ok=True)
+        
+        # Use rsync to download files (reversed direction from sync)
+        rsync_cmd = [
+            'rsync',
+            '-avz',
+            '--progress',
+            '-e', f'ssh -p {self.ssh_port} -o StrictHostKeyChecking=no' + (f' -i {self.ssh_key}' if self.ssh_key else ''),
+            f'{self.user}@{self.host}:{remote_output_path}/',
+            f'{local_output_path}/'
+        ]
+        
+        print(f"   Downloading: {self.host}:{remote_output_path} -> {local_output_path}")
+        
+        try:
+            result = subprocess.run(rsync_cmd, capture_output=False, timeout=300)
+            
+            if result.returncode == 0:
+                print(f"✅ Output files downloaded successfully to {local_output_path}/")
+                return True
+            else:
+                print("❌ Failed to download output files!")
+                return False
+        except subprocess.TimeoutExpired:
+            print("❌ File download timed out!")
+            return False
+        except Exception as e:
+            print(f"❌ Error downloading files: {e}")
+            return False
 
 
 def main():
@@ -234,9 +293,11 @@ def main():
     parser.add_argument('--test', action='store_true', help='Test connection only')
     parser.add_argument('--setup', action='store_true', help='Setup environment')
     parser.add_argument('--install-deps', action='store_true', help='Install dependencies')
-    parser.add_argument('--sync', action='store_true', help='Sync project files')
+    parser.add_argument('--sync', action='store_true', help='Sync project files to vast.ai')
+    parser.add_argument('--download-output', action='store_true', help='Download output files from vast.ai')
     parser.add_argument('--shell', action='store_true', help='Open remote shell')
     parser.add_argument('--command', help='Execute remote command')
+    parser.add_argument('--run-kinematics', action='store_true', help='Run kinematics examples generation')
     
     args = parser.parse_args()
     
@@ -270,22 +331,34 @@ def main():
         if not connector.sync_project_files():
             sys.exit(1)
     
+    if args.download_output:
+        if not connector.download_output_files():
+            sys.exit(1)
+    
     if args.command:
         connector.execute_remote_command(args.command)
     
     if args.shell:
         connector.get_remote_shell()
     
+    if args.run_kinematics:
+        if not connector.run_kinematics_examples():
+            sys.exit(1)
+    
     # If no specific action requested, show help
-    if not any([args.setup, args.install_deps, args.sync, args.command, args.shell]):
+    if not any([args.setup, args.install_deps, args.sync, args.download_output, args.command, args.shell, args.run_kinematics]):
         print("\n📋 Available operations:")
         print("   --test          Test connection to vast.ai")
         print("   --setup         Setup basic environment")
         print("   --install-deps  Install all dependencies")
-        print("   --sync          Sync project files")
+        print("   --sync          Sync project files to vast.ai")
+        print("   --download-output Download output files from vast.ai")
         print("   --shell         Open remote shell")
         print("   --command CMD   Execute remote command")
-        print("\n💡 Example: python main_macbook.py --install-deps --sync")
+        print("   --run-kinematics Run kinematics examples generation")
+        print("\n💡 Example: python3 main_macbook.py --install-deps --sync")
+        print("💡 Example: python3 main_macbook.py --run-kinematics")
+        print("💡 Example: python3 main_macbook.py --download-output")
 
 
 if __name__ == "__main__":
