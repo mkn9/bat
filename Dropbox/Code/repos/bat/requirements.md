@@ -339,6 +339,24 @@ deactivate
   - **EC2/Lambda**: Ensure you're in `/home/ubuntu/bat`
     - **Check**: `pwd` should show `/home/ubuntu/bat`
     - **Fix**: `cd ~/bat` or `cd /home/ubuntu/bat`
+- **"fatal: Unable to create '/Users/mike/.git/index.lock': File exists"**: Git lock file blocking operations
+  - **Root Cause**: Previous git operation was interrupted (crash, force quit, or multiple git processes)
+  - **Solution**: Remove the lock file and retry
+    ```bash
+    # Remove lock file (MacBook)
+    rm -f /Users/mike/.git/index.lock
+    rm -f .git/index.lock
+    
+    # Or in project directory
+    cd /Users/mike/Dropbox/Code/repos/bat
+    rm -f .git/index.lock
+    
+    # Then retry git operation
+    git add <files>
+    git commit -m "message"
+    ```
+  - **Prevention**: Don't run multiple git operations simultaneously, wait for operations to complete
+  - **Verification**: `git status` should work without errors after removing lock file
 - **"Permission denied (publickey)" when pushing from MacBook**: SSH not configured for GitHub
   - **Solution**: See "GitHub SSH Setup for MacBook" section above
   - **Quick fix**: Configure `~/.ssh/config` to use `~/.ssh/github_mkn9` key for GitHub
