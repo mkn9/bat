@@ -43,7 +43,9 @@ def generate_summary():
     test_files = [
         'test_kinematics_formulas.py',
         'test_generate_kinematics_examples.py',
-        'test_kinematics_to_video.py'
+        'test_kinematics_to_video.py',
+        'test_checkpoint_resume.py',
+        'test_training_checkpoint_persistence.py'
     ]
     
     # Try to parse test results from XML if available

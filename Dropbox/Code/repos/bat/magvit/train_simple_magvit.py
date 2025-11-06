@@ -68,9 +68,12 @@ class MultiTaskVideoLoss(nn.Module):
                 task_type: str = 'unconditional') -> Dict[str, Union[torch.Tensor, float]]:
         """Compute multi-task loss"""
         
-        # Get predicted logits and target token IDs
+        # Get predicted logits
         logits = predictions['logits']  # (B, N, vocab_size)
-        target_tokens = predictions['token_ids']  # (B, N)
+        
+        # Tokenize the TARGET video (full video, not masked input)
+        # This is critical: we predict tokens for the full video, not the masked input
+        target_embeddings, target_tokens = predictions['model'].tokenizer(targets)
         
         # Masked language modeling loss (only on masked positions)
         mlm_targets = target_tokens.clone()
@@ -190,8 +193,11 @@ class VideoTrainer:
                 else:
                     target_videos = videos
                 
-                # Compute loss
+                # Compute loss - pass model reference for tokenization
+                # Store model reference in predictions temporarily
+                predictions['model'] = self.model
                 loss_dict = self.loss_fn(predictions, target_videos, predictions['mask'], task_type)
+                predictions.pop('model')  # Remove temporary reference
                 
                 # Backward pass
                 loss_dict['total_loss'].backward()
@@ -244,7 +250,10 @@ class VideoTrainer:
                 for task_type in task_types:
                     try:
                         predictions = self.model(videos, task_type=task_type)
+                        # Pass model reference for tokenization
+                        predictions['model'] = self.model
                         loss_dict = self.loss_fn(predictions, videos, predictions['mask'], task_type)
+                        predictions.pop('model')  # Remove temporary reference
                         
                         val_losses[task_type].append(loss_dict['ce_loss'].item())
                         val_losses['total'].append(loss_dict['total_loss'].item())
@@ -265,8 +274,61 @@ class VideoTrainer:
         
         return val_avg
     
+    def load_checkpoint(self, checkpoint_path: Optional[str] = None) -> int:
+        """Load checkpoint and resume training state
+        
+        Args:
+            checkpoint_path: Path to checkpoint file. If None, tries to load latest checkpoint.
+        
+        Returns:
+            Starting epoch number (0 if no checkpoint found)
+        """
+        if checkpoint_path is None:
+            # Try to load latest checkpoint
+            checkpoint_path = self.output_dir / 'checkpoint_latest.pth'
+            if not checkpoint_path.exists():
+                print("📭 No checkpoint found, starting from scratch")
+                return 0
+        
+        if isinstance(checkpoint_path, Path):
+            checkpoint_path = str(checkpoint_path)
+        
+        if not os.path.exists(checkpoint_path):
+            print(f"📭 Checkpoint not found at {checkpoint_path}, starting from scratch")
+            return 0
+        
+        print(f"📦 Loading checkpoint from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Load optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load scheduler state
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Load best validation loss
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        
+        # Get starting epoch
+        start_epoch = checkpoint.get('epoch', 0) + 1  # Resume from next epoch
+        
+        print(f"✅ Checkpoint loaded! Resuming from epoch {start_epoch+1}")
+        print(f"   Previous best validation loss: {self.best_val_loss:.4f}")
+        
+        return start_epoch
+    
     def save_checkpoint(self, epoch: int, is_best: bool = False):
         """Save model checkpoint"""
+        # Ensure output directory exists
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Verify directory was created
+        if not self.output_dir.exists():
+            raise RuntimeError(f"Failed to create output directory: {self.output_dir}")
+        
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -277,12 +339,29 @@ class VideoTrainer:
         }
         
         # Save latest checkpoint
-        torch.save(checkpoint, self.output_dir / 'checkpoint_latest.pth')
+        latest_path = self.output_dir / 'checkpoint_latest.pth'
+        torch.save(checkpoint, latest_path)
+        
+        # Verify checkpoint was saved
+        if not latest_path.exists():
+            raise RuntimeError(f"Failed to save checkpoint: {latest_path}")
+        
+        checkpoint_size = latest_path.stat().st_size / (1024 * 1024)  # MB
+        if checkpoint_size < 1:
+            print(f"⚠️  Warning: Checkpoint size is suspiciously small: {checkpoint_size:.1f} MB")
         
         # Save best checkpoint
         if is_best:
-            torch.save(checkpoint, self.output_dir / 'checkpoint_best.pth')
-            print(f"💾 Best model saved at epoch {epoch+1}")
+            best_path = self.output_dir / 'checkpoint_best.pth'
+            torch.save(checkpoint, best_path)
+            
+            # Verify best checkpoint was saved
+            if not best_path.exists():
+                raise RuntimeError(f"Failed to save best checkpoint: {best_path}")
+            
+            print(f"💾 Best model saved at epoch {epoch+1} ({checkpoint_size:.1f} MB)")
+        else:
+            print(f"💾 Checkpoint saved at epoch {epoch+1} ({checkpoint_size:.1f} MB)")
     
     def create_visualizations(self, epoch: int):
         """Create and save visualizations"""
@@ -300,11 +379,18 @@ class VideoTrainer:
         if self.args.use_wandb:
             wandb.log({"generated_samples": wandb.Image(str(self.output_dir / f'samples_epoch_{epoch+1:03d}.png'))})
     
-    def train(self):
-        """Main training loop"""
+    def train(self, resume_from: Optional[str] = None):
+        """Main training loop
+        
+        Args:
+            resume_from: Path to checkpoint to resume from. If None, auto-detects latest checkpoint.
+        """
         print("🚀 Starting training...")
         
-        for epoch in range(self.args.epochs):
+        # Try to load checkpoint and resume
+        start_epoch = self.load_checkpoint(resume_from)
+        
+        for epoch in range(start_epoch, self.args.epochs):
             # Train
             train_losses = self.train_epoch(epoch)
             
@@ -394,6 +480,8 @@ def main():
                         help='Path to synthetic dataset')
     parser.add_argument('--output_dir', type=str, default='./experiments/simple_magvit',
                         help='Output directory for checkpoints and logs')
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to checkpoint to resume from (default: auto-detect latest)')
     
     # Model arguments
     parser.add_argument('--hidden_dim', type=int, default=256,
@@ -451,7 +539,7 @@ def main():
     
     # Create trainer and start training
     trainer = VideoTrainer(config, args)
-    trainer.train()
+    trainer.train(resume_from=args.resume_from)
 
 if __name__ == "__main__":
     main() 

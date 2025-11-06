@@ -46,7 +46,7 @@ class VastAIConnector:
             print(f"❌ Error parsing configuration file: {e}")
             sys.exit(1)
     
-    def _run_ssh_command(self, command: str, capture_output: bool = True) -> subprocess.CompletedProcess:
+    def _run_ssh_command(self, command: str, capture_output: bool = True, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
         """Execute SSH command on vast.ai instance"""
         ssh_cmd = ['ssh', '-p', str(self.ssh_port), '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=30']
         
@@ -59,11 +59,13 @@ class VastAIConnector:
         print(f"🔗 Executing: {' '.join(ssh_cmd[:3])} ... {command}")
         
         try:
+            # Use timeout parameter if provided, otherwise use default
+            cmd_timeout = timeout if timeout is not None else (None if 'nohup' in command else 60)
             result = subprocess.run(
                 ssh_cmd,
                 capture_output=capture_output,
                 text=True,
-                timeout=60
+                timeout=cmd_timeout
             )
             return result
         except subprocess.TimeoutExpired:
@@ -375,33 +377,392 @@ class VastAIConnector:
             if not self.convert_kinematics_to_video():
                 return False
         
-        # Run training with kinematics dataset
+        # Run training with kinematics dataset in background using nohup
+        # This ensures training continues even if SSH connection drops
         output_dir = os.path.join(self.remote_path, 'magvit/experiments/kinematics_magvit')
-        command = f"cd {self.remote_path}/magvit && python3 -c \""
-        command += "from train_simple_magvit import VideoTrainer, ModelConfig; "
-        command += "import argparse; "
-        command += "import sys; "
-        command += "sys.path.insert(0, '..'); "
-        command += f"args = argparse.Namespace(data_dir='{dataset_dir}', output_dir='{output_dir}', "
-        command += "hidden_dim=256, num_layers=6, num_heads=8, epochs=10, batch_size=4, "
-        command += "learning_rate=1e-4, weight_decay=1e-4, grad_clip=1.0, save_freq=2, vis_freq=2, "
-        command += "use_wandb=False, run_name='kinematics', num_workers=2, seed=42); "
-        command += "config = ModelConfig(hidden_dim=256, num_layers=6, num_heads=8); "
-        command += "trainer = VideoTrainer(config, args); "
-        command += "trainer.train()"
-        command += "\""
+        log_file = os.path.join(output_dir, 'training.log')
+        pid_file = os.path.join(output_dir, 'training.pid')
+        
+        # Create output directory first
+        mkdir_cmd = f"mkdir -p {output_dir}"
+        mkdir_result = self._run_ssh_command(mkdir_cmd, capture_output=True)
+        if mkdir_result.returncode != 0:
+            print("❌ Failed to create output directory!")
+            return False
+        
+        # Create a Python script to run training (more reliable than inline -c)
+        training_script = f"""import sys
+import os
+sys.path.insert(0, '{self.remote_path}')
+
+from magvit.train_simple_magvit import VideoTrainer, ModelConfig
+import argparse
+
+args = argparse.Namespace(
+    data_dir='{dataset_dir}',
+    output_dir='{output_dir}',
+    hidden_dim=768,
+    num_layers=12,
+    num_heads=12,
+    epochs=400,
+    batch_size=16,
+    learning_rate=1e-4,
+    weight_decay=4.5e-2,
+    grad_clip=1.0,
+    save_freq=5,
+    vis_freq=5,
+    use_wandb=False,
+    run_name='kinematics',
+    num_workers=2,
+    seed=42,
+    resume_from=None
+)
+
+config = ModelConfig(hidden_dim=768, num_layers=12, num_heads=12, mlp_ratio=4)
+trainer = VideoTrainer(config, args)
+trainer.train(resume_from=args.resume_from)
+"""
+        
+        # Write script to temporary file
+        script_path = os.path.join(self.remote_path, 'magvit', 'run_training.py')
+        write_script_cmd = f"cd {self.remote_path}/magvit && cat > run_training.py << 'TRAINSCRIPT'\n{training_script}\nTRAINSCRIPT"
+        
+        # Run training in background with nohup, redirecting output to log file
+        # Use nohup to ensure process survives SSH disconnection
+        # Redirect both stdout and stderr to log file
+        # Create PID file in same directory
+        run_cmd = f"cd {self.remote_path}/magvit && nohup python3 run_training.py > {log_file} 2>&1 & echo $! > {pid_file}"
+        
+        print(f"🚀 Starting training in background (detached session)...")
+        print(f"   Log file: {log_file}")
+        print(f"   PID file: {pid_file}")
+        print(f"   Training will continue even if SSH connection drops")
+        
+        # Write script first
+        write_result = self._run_ssh_command(write_script_cmd, capture_output=True)
+        if write_result.returncode != 0:
+            print("❌ Failed to write training script!")
+            return False
+        
+        # Run training in background using a more reliable method
+        # Create a wrapper script that ensures proper startup and verification
+        wrapper_script = f"""#!/bin/bash
+cd {self.remote_path}/magvit
+
+# Start training in background
+setsid nohup python3 run_training.py > {log_file} 2>&1 < /dev/null &
+TRAIN_PID=$!
+
+# Save PID
+echo $TRAIN_PID > {pid_file}
+
+# Wait a moment for process to start
+sleep 2
+
+# Verify process is actually running
+if ps -p $TRAIN_PID > /dev/null 2>&1; then
+    echo "STARTED:$TRAIN_PID"
+    exit 0
+else
+    echo "FAILED:Process not running"
+    exit 1
+fi
+"""
+        
+        # Write wrapper script
+        wrapper_path = os.path.join(self.remote_path, 'magvit', 'start_training.sh')
+        write_wrapper_cmd = f"cd {self.remote_path}/magvit && cat > start_training.sh << 'WRAPPEREOF'\n{wrapper_script}\nWRAPPEREOF\nchmod +x start_training.sh"
+        
+        write_wrapper_result = self._run_ssh_command(write_wrapper_cmd, capture_output=True)
+        if write_wrapper_result.returncode != 0:
+            print("❌ Failed to write wrapper script!")
+            return False
+        
+        # Run wrapper script (this will start training and verify it's running)
+        run_cmd = f"cd {self.remote_path}/magvit && bash start_training.sh"
+        result = self._run_ssh_command(run_cmd, capture_output=True, timeout=10)
+        
+        if result.returncode == 0:
+            # Parse output to get PID
+            stdout_text = result.stdout.decode('utf-8') if isinstance(result.stdout, bytes) else str(result.stdout)
+            
+            if 'STARTED:' in stdout_text:
+                pid = stdout_text.split('STARTED:')[1].strip().split()[0]
+                print(f"✅ Training started in background! PID: {pid}")
+                print(f"   Process verified as running")
+                print(f"   Process will continue even if you disconnect")
+                print(f"")
+                print(f"📊 Monitoring commands:")
+                print(f"   Check status: python3 main_macbook.py --check-training-status")
+                print(f"   View logs: python3 main_macbook.py --command 'tail -20 {log_file}'")
+                print(f"   Check progress: python3 main_macbook.py --command 'tail -f {log_file}'")
+                return True
+            else:
+                print("❌ Training failed to start!")
+                print(f"   Output: {stdout_text}")
+                return False
+        else:
+            print("❌ Failed to start training!")
+            stderr_text = result.stderr.decode('utf-8') if (result.stderr and isinstance(result.stderr, bytes)) else str(result.stderr) if result.stderr else "Unknown error"
+            print(f"   Error: {stderr_text.strip()}")
+            return False
+    
+    def download_checkpoint_visualizations(self) -> bool:
+        """Download checkpoint visualization images (PNG) to MacBook during training"""
+        output_dir = os.path.join(self.remote_path, 'magvit/experiments/kinematics_magvit')
+        local_path = self.config['project']['local_path']
+        local_output_dir = os.path.join(local_path, 'magvit/experiments/kinematics_magvit')
+        
+        # Create local directory
+        os.makedirs(local_output_dir, exist_ok=True)
+        
+        print(f"📥 Downloading checkpoint visualizations...")
+        print(f"   Remote: {output_dir}")
+        print(f"   Local: {local_output_dir}")
+        
+        # Use rsync to download PNG files (images only, not checkpoints)
+        rsync_cmd = [
+            'rsync',
+            '-avz',
+            '--progress',
+            '--include', '*.png',
+            '--include', '*.jpg',
+            '--include', '*.jpeg',
+            '--exclude', '*',
+            '-e', f'ssh -p {self.ssh_port} -o StrictHostKeyChecking=no' + (f' -i {self.ssh_key}' if self.ssh_key else ''),
+            f'{self.user}@{self.host}:{output_dir}/',
+            f'{local_output_dir}/'
+        ]
+        
+        print(f"   Downloading: {self.host}:{output_dir}/*.png -> {local_output_dir}/")
+        
+        try:
+            result = subprocess.run(rsync_cmd, capture_output=False, timeout=300)
+            
+            if result.returncode == 0:
+                # Count downloaded files
+                png_files = list(Path(local_output_dir).glob('*.png'))
+                if png_files:
+                    print(f"✅ Downloaded {len(png_files)} visualization files")
+                    for f in sorted(png_files)[-5:]:  # Show last 5
+                        print(f"   - {f.name}")
+                else:
+                    print(f"⚠️  No PNG files found (training may not have generated visualizations yet)")
+                return True
+            else:
+                print(f"⚠️  Download had issues (files may not exist yet)")
+                return False
+        except subprocess.TimeoutExpired:
+            print("❌ Download timed out!")
+            return False
+        except Exception as e:
+            print(f"❌ Download failed: {e}")
+            return False
+    
+    def check_training_status(self) -> bool:
+        """Check status of background training without interfering with it"""
+        output_dir = os.path.join(self.remote_path, 'magvit/experiments/kinematics_magvit')
+        log_file = os.path.join(output_dir, 'training.log')
+        pid_file = os.path.join(output_dir, 'training.pid')
+        checkpoint_file = os.path.join(output_dir, 'checkpoint_latest.pth')
+        
+        print("📊 Checking training status...")
+        print("")
+        
+        # Check if PID file exists
+        check_pid_cmd = f"test -f {pid_file} && cat {pid_file} || echo 'NO_PID'"
+        pid_result = self._run_ssh_command(check_pid_cmd, capture_output=True)
+        pid_text = pid_result.stdout.decode('utf-8') if isinstance(pid_result.stdout, bytes) else str(pid_result.stdout)
+        pid = pid_text.strip()
+        
+        if pid and pid != 'NO_PID':
+            # Check if process is running
+            ps_cmd = f"ps -p {pid} > /dev/null 2>&1 && echo 'RUNNING' || echo 'NOT_RUNNING'"
+            ps_result = self._run_ssh_command(ps_cmd, capture_output=True)
+            ps_text = ps_result.stdout.decode('utf-8') if isinstance(ps_result.stdout, bytes) else str(ps_result.stdout)
+            is_running = 'RUNNING' in ps_text.strip()
+            
+            print(f"🔄 Process Status:")
+            print(f"   PID: {pid}")
+            print(f"   Running: {'✅ Yes' if is_running else '❌ No'}")
+        else:
+            print(f"🔄 Process Status: ❌ No PID file found")
+            is_running = False
+        
+        print("")
+        
+        # Check checkpoint
+        check_ckpt_cmd = f"test -f {checkpoint_file} && echo 'EXISTS' || echo 'NOT_EXISTS'"
+        ckpt_result = self._run_ssh_command(check_ckpt_cmd, capture_output=True)
+        ckpt_text = ckpt_result.stdout.decode('utf-8') if isinstance(ckpt_result.stdout, bytes) else str(ckpt_result.stdout)
+        has_checkpoint = 'EXISTS' in ckpt_text.strip()
+        
+        if has_checkpoint:
+            # Get checkpoint info (safe - just reading, not interfering)
+            # Build command string carefully to avoid variable name conflicts
+            ckpt_info_cmd = f"""python3 << 'CMDPYEOF'
+import torch
+try:
+    ckpt = torch.load('{checkpoint_file}', map_location='cpu', weights_only=False)
+    epoch_val = ckpt.get('epoch', -1) + 1
+    best_loss_val = ckpt.get('best_val_loss', float('inf'))
+    print('EPOCH:' + str(epoch_val))
+    print('LOSS:' + str(round(best_loss_val, 4)))
+except Exception as e:
+    print('ERROR:' + str(e))
+CMDPYEOF
+"""
+            ckpt_info_result = self._run_ssh_command(f"cd {output_dir} && {ckpt_info_cmd}", capture_output=True)
+            ckpt_info_text = ckpt_info_result.stdout.decode('utf-8') if isinstance(ckpt_info_result.stdout, bytes) else str(ckpt_info_result.stdout)
+            
+            epoch = None
+            loss = None
+            for line in ckpt_info_text.strip().split('\n'):
+                if line.startswith('EPOCH:'):
+                    epoch = line.split('EPOCH:')[1].strip()
+                elif line.startswith('LOSS:'):
+                    loss = line.split('LOSS:')[1].strip()
+            
+            print(f"📦 Checkpoint Status:")
+            print(f"   Latest checkpoint: ✅ Found")
+            if epoch and epoch != 'None':
+                try:
+                    epoch_num = int(epoch)
+                    print(f"   Current epoch: {epoch_num}/400 ({epoch_num/400*100:.1f}%)")
+                except (ValueError, TypeError):
+                    print(f"   Current epoch: {epoch}")
+            if loss and loss != 'None':
+                print(f"   Best validation loss: {loss}")
+        else:
+            print(f"📦 Checkpoint Status: ⏳ No checkpoint yet (training just started)")
+        
+        print("")
+        
+        # Check log file
+        log_tail_cmd = f"tail -5 {log_file} 2>/dev/null | grep -E 'Epoch|Loss|Val Loss|Summary' | tail -3 || echo 'No recent log entries'"
+        log_result = self._run_ssh_command(log_tail_cmd, capture_output=True)
+        log_text = log_result.stdout.decode('utf-8') if isinstance(log_result.stdout, bytes) else str(log_result.stdout)
+        
+        if log_text.strip() and 'No recent log entries' not in log_text:
+            print(f"📝 Recent Log Activity:")
+            for line in log_text.strip().split('\n')[:3]:
+                if line.strip():
+                    print(f"   {line.strip()}")
+        else:
+            print(f"📝 Recent Log Activity: ⏳ No recent activity")
+        
+        print("")
+        
+        # Overall status
+        # Check if training completed (epoch reached max epochs)
+        training_completed = False
+        if epoch and epoch != 'None':
+            try:
+                epoch_num = int(epoch)
+                # Training is complete if epoch >= 400 (epochs are 0-indexed, so 400 = completed all 400 epochs)
+                # Or if checkpoint shows epoch 399 (which is the 400th epoch, 0-indexed)
+                if epoch_num >= 399:  # 0-indexed: epoch 399 = 400th epoch completed
+                    training_completed = True
+            except (ValueError, TypeError):
+                pass
+        
+        # Check log file for completion message
+        completion_check_cmd = f"grep -i 'Training completed\\|Training finished' {log_file} 2>/dev/null | tail -1 || echo ''"
+        completion_result = self._run_ssh_command(completion_check_cmd, capture_output=True)
+        completion_text = completion_result.stdout.decode('utf-8') if isinstance(completion_result.stdout, bytes) else str(completion_result.stdout)
+        if 'completed' in completion_text.lower() or 'finished' in completion_text.lower():
+            training_completed = True
+        
+        if training_completed:
+            print("✅ Training completed successfully!")
+            print(f"   Final epoch: {epoch if epoch else 'N/A'}/400")
+            print(f"   Best validation loss: {loss if loss else 'N/A'}")
+            print(f"   Checkpoint saved: {checkpoint_file}")
+            print(f"   Ready for inference: python3 main_macbook.py --run-magvit-inference")
+        elif is_running:
+            print("🔄 Training is running successfully!")
+            print(f"   Current epoch: {epoch if epoch else 'In progress...'}/400")
+            print(f"   Check again anytime with: python3 main_macbook.py --check-training-status")
+        elif has_checkpoint:
+            print("⚠️  Training process not running, but checkpoint exists")
+            print(f"   Last checkpoint: Epoch {epoch if epoch else 'Unknown'}/400")
+            print("   Training may have stopped or encountered an error")
+            print("   Check logs: python3 main_macbook.py --command 'tail -50 {log_file}'")
+            print("   To resume: python3 main_macbook.py --run-magvit-kinematics")
+        else:
+            print("❌ Training not running and no checkpoint found")
+            print("   Start training: python3 main_macbook.py --run-magvit-kinematics")
+        
+        return is_running
+    
+    def run_magvit_inference(self) -> bool:
+        """Run MAGVIT inference to demonstrate prediction of missing observations"""
+        print("🎬 Running MAGVIT inference example...")
+        print("   This will demonstrate predicting missing observations in kinematics videos")
+        
+        # Find the latest checkpoint
+        experiments_dir = os.path.join(self.remote_path, 'magvit/experiments/kinematics_magvit')
+        
+        # Check for checkpoint - try multiple locations and patterns
+        find_checkpoint_cmd = f"find {experiments_dir} -name '*.pth' -o -name '*.pt' 2>/dev/null | head -1"
+        checkpoint_result = self._run_ssh_command(find_checkpoint_cmd, capture_output=True)
+        stdout_text = checkpoint_result.stdout.decode('utf-8') if isinstance(checkpoint_result.stdout, bytes) else str(checkpoint_result.stdout)
+        checkpoint_path = stdout_text.strip()
+        
+        # If not found, check in nested directories or use kinematics checkpoint
+        if not checkpoint_path or checkpoint_path == '':
+            # Try kinematics checkpoint first
+            find_checkpoint_cmd = f"find {experiments_dir} -name 'checkpoint_best.pth' -o -name 'checkpoint_latest.pth' 2>/dev/null | head -1"
+            checkpoint_result = self._run_ssh_command(find_checkpoint_cmd, capture_output=True)
+            stdout_text = checkpoint_result.stdout.decode('utf-8') if isinstance(checkpoint_result.stdout, bytes) else str(checkpoint_result.stdout)
+            checkpoint_path = stdout_text.strip()
+        
+        # If still not found, DO NOT fall back to other checkpoints
+        # This prevents using wrong checkpoint (e.g., synthetic data checkpoint for kinematics)
+        if not checkpoint_path or checkpoint_path == '':
+            print("❌ No kinematics training checkpoint found!")
+            print(f"   Expected location: {experiments_dir}")
+            print(f"   This checkpoint is required for kinematics inference")
+            print(f"")
+            print("   Please train the model first:")
+            print("   python3 main_macbook.py --run-magvit-kinematics")
+            print("")
+            print("   ⚠️  Do NOT use checkpoints from other training runs (e.g., synthetic data)")
+            return False
+        
+        # Make path relative or absolute as needed
+        if checkpoint_path.startswith('/'):
+            # Already absolute
+            full_checkpoint_path = checkpoint_path
+        else:
+            # Relative path
+            full_checkpoint_path = os.path.join(experiments_dir, checkpoint_path)
+        
+        # Use a sample kinematics CSV for demonstration
+        sample_csv = os.path.join(self.remote_path, 'kinematics_examples/example_01_constant_velocity.csv')
+        
+        # Run inference
+        output_dir = os.path.join(self.remote_path, 'magvit/inference_results')
+        command = f"cd {self.remote_path}/magvit && python3 inference_example.py "
+        command += f"--checkpoint {full_checkpoint_path} "
+        command += f"--input {sample_csv} "
+        command += f"--input_type csv "
+        command += f"--mask_ratio 0.5 "
+        command += f"--output_dir {output_dir} "
+        command += "--device cuda"
         
         result = self._run_ssh_command(command, capture_output=False)
         
         if result.returncode == 0:
-            print("✅ MAGVIT kinematics training completed successfully!")
+            print("✅ MAGVIT inference completed successfully!")
+            print(f"📁 Results saved to: {output_dir}")
             
-            # List output directory
-            list_cmd = f"cd {self.remote_path}/magvit && ls -la experiments/kinematics_magvit/ 2>/dev/null | head -10 || echo 'No training output found'"
+            # List output files
+            list_cmd = f"cd {self.remote_path}/magvit && ls -la {output_dir}/"
             self._run_ssh_command(list_cmd)
             return True
         else:
-            print("❌ Failed to run MAGVIT kinematics training!")
+            print("❌ Failed to run MAGVIT inference!")
             return False
     
     def install_magvit_dependencies(self) -> bool:
@@ -460,7 +821,10 @@ def main():
     parser.add_argument('--run-magvit', action='store_true', help='Run MAGVIT simple example')
     parser.add_argument('--run-magvit-training', action='store_true', help='Run MAGVIT training and inference example')
     parser.add_argument('--convert-kinematics', action='store_true', help='Convert kinematics CSV examples to video dataset')
-    parser.add_argument('--run-magvit-kinematics', action='store_true', help='Run MAGVIT training on kinematics dataset')
+    parser.add_argument('--run-magvit-kinematics', action='store_true', help='Run MAGVIT training on kinematics dataset (runs in background)')
+    parser.add_argument('--check-training-status', action='store_true', help='Check status of background training (safe, non-interfering)')
+    parser.add_argument('--download-checkpoint-images', action='store_true', help='Download checkpoint visualization images to MacBook')
+    parser.add_argument('--run-magvit-inference', action='store_true', help='Run MAGVIT inference to predict missing observations')
     parser.add_argument('--install-magvit-deps', action='store_true', help='Install MAGVIT dependencies on vast.ai')
     
     args = parser.parse_args()
@@ -523,6 +887,19 @@ def main():
     
     if args.run_magvit_kinematics:
         if not connector.run_magvit_kinematics_training():
+            sys.exit(1)
+    
+    if args.check_training_status:
+        connector.check_training_status()
+        sys.exit(0)
+    
+    if args.download_checkpoint_images:
+        if not connector.download_checkpoint_visualizations():
+            sys.exit(1)
+        sys.exit(0)
+    
+    if args.run_magvit_inference:
+        if not connector.run_magvit_inference():
             sys.exit(1)
     
     if args.install_magvit_deps:
